@@ -1,0 +1,27 @@
+{
+    "manifest_version": 3,
+    "name": "PromptTrail (Phase 1)",
+    "version": "0.0.1",
+    "description": "Phase 1: inject a hello box on GPT pages.",
+    "permissions": [],
+    "host_permissions": [
+      "https://chat.openai.com/*",
+      "https://claude.ai/*"
+    ],
+    "content_scripts": [
+        {
+          "matches": [
+            "https://chatgpt.com/*",
+            "https://chat.openai.com/*",
+            "https://claude.ai/*"
+          ],
+          "js": ["content.js"],
+          "run_at": "document_idle",
+          "all_frames": true
+        }
+    ]
+      
+  }
+
+
+
