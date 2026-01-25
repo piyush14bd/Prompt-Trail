@@ -65,24 +65,17 @@
   function ensureButtonOn(blockEl) {
     if (!blockEl) return;
     if (blockEl.querySelector(`.${BTN_CLASS}`)) return;
-
+  
     // Ensure positioning context
     if (!blockEl.style.position || blockEl.style.position === "static") {
       blockEl.style.position = "relative";
     }
-
-    // Prevent text overlap
-    if (!blockEl.style.paddingRight) {
-      blockEl.style.paddingRight = "36px";
-    }
-
+  
     const btn = document.createElement("button");
     btn.className = BTN_CLASS;
     btn.textContent = "🔖 Bookmark";
-
+  
     btn.style.position = "absolute";
-    btn.style.top = "6px";
-    btn.style.right = "6px";
     btn.style.zIndex = "2147483647";
     btn.style.fontSize = "12px";
     btn.style.lineHeight = "1";
@@ -91,15 +84,43 @@
     btn.style.border = "1px solid rgba(0,0,0,0.12)";
     btn.style.background = "rgba(255,255,255,0.95)";
     btn.style.cursor = "pointer";
-    btn.style.opacity = "0.9";
+    btn.style.opacity = "0.95";
     btn.style.pointerEvents = "auto";
     btn.style.color = "#111";
-
+  
+    // --- NEW: position near selection ---
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) {
+      const range = sel.getRangeAt(0);
+      const rect = range.getBoundingClientRect();
+      const blockRect = blockEl.getBoundingClientRect();
+  
+      // Position relative to block
+      let top = rect.top - blockRect.top - 32;
+      let left = rect.right - blockRect.left + 8;
+  
+      // Clamp inside block
+      top = Math.max(4, top);
+      left = Math.min(
+        blockEl.clientWidth - 100,
+        Math.max(4, left)
+      );
+  
+      btn.style.top = `${top}px`;
+      btn.style.left = `${left}px`;
+    } else {
+      // Fallback (should rarely happen)
+      btn.style.top = "6px";
+      btn.style.right = "6px";
+    }
+  
+    // Subtle hover feedback
     btn.addEventListener("mouseenter", () => (btn.style.opacity = "1"));
     btn.addEventListener("mouseleave", () => (btn.style.opacity = "0.9"));
-
+  
     blockEl.appendChild(btn);
   }
+  
 
   /***********************************************************
    * Selection + Hover State
