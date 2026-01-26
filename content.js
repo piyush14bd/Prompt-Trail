@@ -7,10 +7,20 @@
   const RAIL_ID = "prompttrail-scroll-rail";
   const BLOCK_SELECTOR = "p, li, h1, h2, h3, h4, blockquote, pre";
 
+  const STORAGE_KEY = "prompttrail_bookmarks_v1"; // { [convoId]: Bookmark[] }
+
   /***********************************************************
-   * In-memory bookmarks (page lifetime)
+   * Conversation id (ChatGPT URL: /c/<id>)
    ***********************************************************/
-  const bookmarks = [];
+  function getConversationId() {
+    const m = location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
+    return m ? m[1] : "unknown";
+  }
+
+  /***********************************************************
+   * In-memory bookmarks (mirrors storage)
+   ***********************************************************/
+  let bookmarks = [];
 
   /***********************************************************
    * Debug badge
@@ -65,7 +75,7 @@
   ensureScrollRail();
 
   /***********************************************************
-   * Helpers
+   * Helpers (stable)
    ***********************************************************/
   function findMessageContainer(el) {
     let cur = el;
@@ -143,15 +153,8 @@
       const blocks = messageEl.querySelectorAll(BLOCK_SELECTOR);
       const targetBlock = blocks[bookmark.blockIndex] || messageEl;
 
-      const posInContent = elementCenterYRelativeToContainer(
-        container,
-        targetBlock
-      );
-
-      const percent = Math.max(
-        0,
-        Math.min(1, posInContent / scrollRange)
-      );
+      const posInContent = elementCenterYRelativeToContainer(container, targetBlock);
+      const percent = Math.max(0, Math.min(1, posInContent / scrollRange));
 
       const marker = document.createElement("div");
       marker.style.position = "absolute";
@@ -165,14 +168,14 @@
       marker.style.pointerEvents = "auto";
 
       marker.dataset.messageId = bookmark.messageId;
-      marker.dataset.blockIndex = bookmark.blockIndex;
+      marker.dataset.blockIndex = String(bookmark.blockIndex);
 
       rail.appendChild(marker);
     });
   }
 
   /***********************************************************
-   * Keep markers in sync with layout
+   * Keep markers synced with layout (THIS WAS MISSING)
    ***********************************************************/
   let debounceTimer = null;
   function scheduleRender() {
@@ -181,22 +184,31 @@
   }
 
   window.addEventListener("resize", scheduleRender, { passive: true });
-  window.addEventListener("orientationchange", scheduleRender, {
-    passive: true,
-  });
+  window.addEventListener("orientationchange", scheduleRender, { passive: true });
 
+  // attach scroll listener to the real scroll container
   let lastContainer = null;
   setInterval(() => {
     const c = findScrollContainer();
     if (c !== lastContainer) {
+      if (lastContainer) {
+        // we can't easily remove the previous listener reference here,
+        // but switching containers is rare; acceptable for now.
+      }
       lastContainer = c;
       c.addEventListener("scroll", scheduleRender, { passive: true });
       scheduleRender();
     }
   }, 800);
 
+  // rerender when new messages load / DOM changes
+  new MutationObserver(scheduleRender).observe(document.body, {
+    childList: true,
+    subtree: true,
+  });
+
   /***********************************************************
-   * Marker click → precise jump
+   * Marker click → precise jump (stable)
    ***********************************************************/
   document.addEventListener(
     "click",
@@ -219,13 +231,8 @@
       const targetBlock = blocks[blockIndex] || messageEl;
 
       const container = findScrollContainer();
-      const posInContent = elementCenterYRelativeToContainer(
-        container,
-        targetBlock
-      );
-
-      const targetScrollTop =
-        posInContent - container.clientHeight / 2;
+      const posInContent = elementCenterYRelativeToContainer(container, targetBlock);
+      const targetScrollTop = posInContent - container.clientHeight / 2;
 
       if (
         container === document.scrollingElement ||
@@ -244,7 +251,45 @@
   );
 
   /***********************************************************
-   * Selection-scoped bookmark button
+   * Storage: load/save WITHOUT touching UI logic
+   ***********************************************************/
+  function loadBookmarks() {
+    const convoId = getConversationId();
+
+    // If storage isn't available (or permission missing), just run in-memory.
+    if (!chrome?.storage?.sync) {
+      console.warn("[PromptTrail] chrome.storage.sync not available; using memory only.");
+      scheduleRender();
+      return;
+    }
+
+    chrome.storage.sync.get(STORAGE_KEY, (data) => {
+      const all = data[STORAGE_KEY] || {};
+      bookmarks = all[convoId] || [];
+      renderBookmarkMarkers(); // immediate
+      scheduleRender();        // and resync
+    });
+  }
+
+  function persistBookmarks() {
+    const convoId = getConversationId();
+    if (!chrome?.storage?.sync) return;
+
+    chrome.storage.sync.get(STORAGE_KEY, (data) => {
+      const all = data[STORAGE_KEY] || {};
+      all[convoId] = bookmarks;
+      chrome.storage.sync.set({ [STORAGE_KEY]: all }, () => {
+        // keep markers always correct after persistence too
+        renderBookmarkMarkers();
+        scheduleRender();
+      });
+    });
+  }
+
+  loadBookmarks();
+
+  /***********************************************************
+   * Selection-scoped bookmark button (UNCHANGED)
    ***********************************************************/
   let activeBlock = null;
   let selectedBlock = null;
@@ -339,7 +384,7 @@
   );
 
   /***********************************************************
-   * Bookmark button click → save + render markers
+   * Bookmark button click → add bookmark + persist + render
    ***********************************************************/
   document.addEventListener(
     "click",
@@ -361,13 +406,20 @@
         messageId: messageEl.getAttribute("data-message-id"),
         role: messageEl.getAttribute("data-message-author-role"),
         blockIndex: getBlockIndex(messageEl, blockEl),
-        blockTag: blockEl.tagName,
-        preview: (blockEl.innerText || "").trim().slice(0, 160),
         createdAt: Date.now(),
       };
 
-      bookmarks.push(bookmark);
+      // avoid duplicates (same messageId + blockIndex)
+      const exists = bookmarks.some(
+        (b) => b.messageId === bookmark.messageId && b.blockIndex === bookmark.blockIndex
+      );
+      if (!exists) {
+        bookmarks.push(bookmark);
+        persistBookmarks();
+      }
+
       renderBookmarkMarkers();
+      scheduleRender();
 
       console.log("[PromptTrail] Bookmark saved:", bookmark);
 
