@@ -6,8 +6,7 @@
   const BTN_CLASS = "prompttrail-bookmark-btn";
   const RAIL_ID = "prompttrail-scroll-rail";
   const BLOCK_SELECTOR = "p, li, h1, h2, h3, h4, blockquote, pre";
-
-  const STORAGE_KEY = "prompttrail_bookmarks_v1"; // { [convoId]: Bookmark[] }
+  const STORAGE_KEY = "prompttrail_bookmarks_v2"; // { [convoId]: Bookmark[] }
 
   /***********************************************************
    * Conversation id (ChatGPT URL: /c/<id>)
@@ -42,7 +41,6 @@
     badge.style.fontSize = "12px";
     badge.style.color = "#111";
     badge.style.pointerEvents = "none";
-
     document.documentElement.appendChild(badge);
   }
 
@@ -68,14 +66,12 @@
     rail.style.zIndex = "2147483646";
     rail.style.pointerEvents = "auto";
     rail.style.background = "rgba(0,0,0,0.03)";
-
     document.documentElement.appendChild(rail);
   }
-
   ensureScrollRail();
 
   /***********************************************************
-   * Helpers (stable)
+   * Helpers (DOM + scroll container)
    ***********************************************************/
   function findMessageContainer(el) {
     let cur = el;
@@ -89,11 +85,6 @@
       cur = cur.parentNode;
     }
     return null;
-  }
-
-  function getBlockIndex(messageEl, blockEl) {
-    const blocks = Array.from(messageEl.querySelectorAll(BLOCK_SELECTOR));
-    return blocks.indexOf(blockEl);
   }
 
   function findScrollContainer() {
@@ -121,16 +112,320 @@
   function elementCenterYRelativeToContainer(container, el) {
     const elRect = el.getBoundingClientRect();
     const containerRect = container.getBoundingClientRect();
-
     const elCenterViewportY = elRect.top + elRect.height / 2;
     const containerViewportTop = containerRect.top;
-
     const distanceInViewport = elCenterViewportY - containerViewportTop;
     return container.scrollTop + distanceInViewport;
   }
 
   /***********************************************************
-   * Render bookmark markers (PIXEL-ACCURATE)
+   * Selection → precise offsets within message
+   * We store offsets across ALL text nodes inside the message.
+   ***********************************************************/
+  function getTextOffsetIn(rootEl, node, nodeOffset) {
+    const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null);
+    let offset = 0;
+
+    while (walker.nextNode()) {
+      const t = walker.currentNode;
+      if (t === node) return offset + nodeOffset;
+      offset += t.textContent.length;
+    }
+    return -1;
+  }
+
+  function rangeFromOffsets(rootEl, start, end) {
+    const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null);
+    let offset = 0;
+
+    let startNode = null,
+      endNode = null,
+      startOffset = 0,
+      endOffset = 0;
+
+    while (walker.nextNode()) {
+      const t = walker.currentNode;
+      const len = t.textContent.length;
+
+      if (!startNode && offset + len >= start) {
+        startNode = t;
+        startOffset = Math.max(0, start - offset);
+      }
+      if (startNode && offset + len >= end) {
+        endNode = t;
+        endOffset = Math.max(0, end - offset);
+        break;
+      }
+      offset += len;
+    }
+
+    if (!startNode || !endNode) return null;
+
+    const r = document.createRange();
+    r.setStart(startNode, startOffset);
+    r.setEnd(endNode, endOffset);
+    return r;
+  }
+
+  function getSelectionPayload() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+
+    const range = sel.getRangeAt(0);
+    const selectedText = sel.toString().trim();
+    if (!selectedText) return null;
+
+    // Find a reasonable element to start walking up
+    const startEl =
+      range.startContainer.nodeType === Node.TEXT_NODE
+        ? range.startContainer.parentElement
+        : range.startContainer;
+
+    if (!startEl) return null;
+
+    const messageEl = findMessageContainer(startEl);
+    if (!messageEl) return null;
+
+    const startAbs = getTextOffsetIn(
+      messageEl,
+      range.startContainer,
+      range.startOffset
+    );
+    const endAbs = getTextOffsetIn(
+      messageEl,
+      range.endContainer,
+      range.endOffset
+    );
+
+    if (startAbs < 0 || endAbs < 0 || endAbs <= startAbs) return null;
+
+    return {
+      messageId: messageEl.getAttribute("data-message-id"),
+      role: messageEl.getAttribute("data-message-author-role"),
+      startAbs,
+      endAbs,
+      selectedText,
+    };
+  }
+
+  function defaultDescFromText(text) {
+    const words = (text || "").trim().split(/\s+/).filter(Boolean);
+    return words.slice(0, 10).join(" ");
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
+
+  /***********************************************************
+   * Marker tooltip + delete + edit (FIXED)
+   ***********************************************************/
+  let markerTooltip = null;
+
+  function hideMarkerTooltip() {
+    if (markerTooltip) {
+      markerTooltip.remove();
+      markerTooltip = null;
+    }
+  }
+
+  function positionTooltipNearMarker(marker, tooltip) {
+    const rect = marker.getBoundingClientRect();
+    const tooltipHeight = tooltip.offsetHeight || 100;
+    const margin = 10;
+
+    // Prefer above
+    let top = rect.top - tooltipHeight - margin;
+
+    // If not enough space above, flip below
+    if (top < margin) {
+      top = rect.bottom + margin;
+    }
+
+    // Clamp to viewport
+    top = Math.min(
+      window.innerHeight - tooltipHeight - margin,
+      Math.max(margin, top)
+    );
+
+    tooltip.style.top = `${top}px`;
+    tooltip.style.right = `12px`;
+  }
+
+  function deleteBookmark(bookmark) {
+    bookmarks = bookmarks.filter((b) =>
+      bookmark.id
+        ? b.id !== bookmark.id
+        : !(
+            b.messageId === bookmark.messageId &&
+            b.startAbs === bookmark.startAbs &&
+            b.endAbs === bookmark.endAbs
+          )
+    );
+
+    persistBookmarks(() => {
+      renderBookmarkMarkers();
+      scheduleRender();
+    });
+  }
+
+  function showMarkerTooltip(marker, bookmark) {
+    if (markerTooltip) return;
+    hideMarkerTooltip();
+
+    const tooltip = document.createElement("div");
+    tooltip.style.position = "fixed";
+    tooltip.style.zIndex = "2147483647";
+    tooltip.style.maxWidth = "260px";
+    tooltip.style.padding = "8px 10px";
+    tooltip.style.borderRadius = "10px";
+    tooltip.style.background = "rgba(0,0,0,0.88)";
+    tooltip.style.color = "#fff";
+    tooltip.style.fontSize = "12px";
+    tooltip.style.lineHeight = "1.35";
+    tooltip.style.boxShadow = "0 6px 16px rgba(0,0,0,0.25)";
+    tooltip.style.pointerEvents = "auto";
+
+    tooltip.innerHTML = `
+      <div id="pt-desc-view" style="margin-bottom:8px;">
+        ${escapeHtml(bookmark.desc || bookmark.preview || "Bookmark")}
+      </div>
+
+      <input id="pt-desc-edit"
+        style="
+          display:none;
+          width:100%;
+          box-sizing:border-box;
+          padding:4px 6px;
+          font-size:12px;
+          border-radius:6px;
+          border:1px solid #555;
+          outline:none;
+          background:#111;
+          color:#fff;
+        "
+      />
+
+      <div style="display:flex; gap:10px; align-items:center;">
+        <button id="pt-edit"
+          style="background:none;border:none;color:#9fd1ff;cursor:pointer;font-size:12px;">
+          ✏️ Edit
+        </button>
+
+        <button id="pt-delete"
+          style="background:none;border:none;color:#ffb4b4;cursor:pointer;font-size:12px;">
+          🗑️ Delete
+        </button>
+      </div>
+    `;
+
+    document.body.appendChild(tooltip);
+
+    tooltip.addEventListener("mousedown", (e) => {
+      e.stopPropagation();
+    });
+    
+    setTimeout(() => {
+      const onOutsideClick = (e) => {
+        if (!tooltip.contains(e.target)) {
+          hideMarkerTooltip();
+          document.removeEventListener("mousedown", onOutsideClick, true);
+        }
+      };
+      document.addEventListener("mousedown", onOutsideClick, true);
+    }, 0);
+    
+
+    markerTooltip = tooltip;
+
+    positionTooltipNearMarker(marker, tooltip);
+
+    // Keep tooltip alive while hovering it
+    // tooltip.addEventListener("mouseleave", hideMarkerTooltip);
+
+    // Wire up controls (FIXED: must be inside function)
+    const view = tooltip.querySelector("#pt-desc-view");
+    const input = tooltip.querySelector("#pt-desc-edit");
+    const editBtn = tooltip.querySelector("#pt-edit");
+    const deleteBtn = tooltip.querySelector("#pt-delete");
+
+    editBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      input.value = bookmark.desc || bookmark.preview || "";
+      view.style.display = "none";
+      input.style.display = "block";
+      input.focus();
+    });
+
+    function saveEdit() {
+      const newDesc = input.value.trim().split(/\s+/).slice(0, 10).join(" ");
+      if (newDesc) {
+        bookmark.desc = newDesc;
+        persistBookmarks(() => {
+          renderBookmarkMarkers();
+          scheduleRender();
+        });
+      }
+      hideMarkerTooltip();
+    }
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveEdit();
+      if (e.key === "Escape") hideMarkerTooltip();
+    });
+
+    input.addEventListener("blur", saveEdit);
+
+    deleteBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteBookmark(bookmark);
+      hideMarkerTooltip();
+    });
+  }
+
+  /***********************************************************
+   * Storage: load/save
+   ***********************************************************/
+  function loadBookmarks() {
+    const convoId = getConversationId();
+    if (!chrome?.storage?.sync) {
+      console.warn(
+        "[PromptTrail] chrome.storage.sync not available; using memory only."
+      );
+      return;
+    }
+
+    chrome.storage.sync.get(STORAGE_KEY, (data) => {
+      const all = data[STORAGE_KEY] || {};
+      bookmarks = all[convoId] || [];
+      renderBookmarkMarkers();
+      scheduleRender();
+    });
+  }
+
+  function persistBookmarks(cb) {
+    const convoId = getConversationId();
+    if (!chrome?.storage?.sync) {
+      cb?.();
+      return;
+    }
+
+    chrome.storage.sync.get(STORAGE_KEY, (data) => {
+      const all = data[STORAGE_KEY] || {};
+      all[convoId] = bookmarks;
+      chrome.storage.sync.set({ [STORAGE_KEY]: all }, () => cb?.());
+    });
+  }
+
+  loadBookmarks();
+
+  /***********************************************************
+   * Render markers (pixel-accurate using saved range mid-point)
    ***********************************************************/
   function renderBookmarkMarkers() {
     const rail = document.getElementById(RAIL_ID);
@@ -139,10 +434,7 @@
     rail.innerHTML = "";
 
     const container = findScrollContainer();
-    const scrollRange = Math.max(
-      1,
-      container.scrollHeight - container.clientHeight
-    );
+    const scrollRange = Math.max(1, container.scrollHeight - container.clientHeight);
 
     bookmarks.forEach((bookmark) => {
       const messageEl = document.querySelector(
@@ -150,32 +442,61 @@
       );
       if (!messageEl) return;
 
-      const blocks = messageEl.querySelectorAll(BLOCK_SELECTOR);
-      const targetBlock = blocks[bookmark.blockIndex] || messageEl;
+      const r = rangeFromOffsets(messageEl, bookmark.startAbs, bookmark.endAbs);
+      let targetEl = messageEl;
 
-      const posInContent = elementCenterYRelativeToContainer(container, targetBlock);
+      if (r) {
+        const rect = r.getBoundingClientRect();
+        if (rect && rect.height > 0) {
+          const fake = { getBoundingClientRect: () => rect };
+          const pos = elementCenterYRelativeToContainer(container, fake);
+          const percent = Math.max(0, Math.min(1, pos / scrollRange));
+          appendMarker(rail, percent, bookmark);
+          return;
+        }
+      }
+
+      const posInContent = elementCenterYRelativeToContainer(container, targetEl);
       const percent = Math.max(0, Math.min(1, posInContent / scrollRange));
-
-      const marker = document.createElement("div");
-      marker.style.position = "absolute";
-      marker.style.top = `${percent * 100}%`;
-      marker.style.left = "0";
-      marker.style.width = "100%";
-      marker.style.height = "3px";
-      marker.style.background = "#ff9800";
-      marker.style.borderRadius = "2px";
-      marker.style.cursor = "pointer";
-      marker.style.pointerEvents = "auto";
-
-      marker.dataset.messageId = bookmark.messageId;
-      marker.dataset.blockIndex = String(bookmark.blockIndex);
-
-      rail.appendChild(marker);
+      appendMarker(rail, percent, bookmark);
     });
   }
 
+  function appendMarker(rail, percent, bookmark) {
+    const marker = document.createElement("div");
+    marker.style.position = "absolute";
+    marker.style.top = `${percent * 100}%`;
+    marker.style.left = "0";
+    marker.style.width = "100%";
+    marker.style.height = "3px";
+    marker.style.background = "#ff9800";
+    marker.style.borderRadius = "2px";
+    marker.style.cursor = "pointer";
+    marker.style.pointerEvents = "auto";
+
+    marker.dataset.id = bookmark.id || "";
+    marker.dataset.messageId = bookmark.messageId;
+    marker.dataset.startAbs = String(bookmark.startAbs);
+    marker.dataset.endAbs = String(bookmark.endAbs);
+
+    marker.addEventListener("mouseenter", () => showMarkerTooltip(marker, bookmark));
+    // marker.addEventListener("mouseleave", () => {
+    //   setTimeout(() => {
+    //     const onClickOutside = (e) => {
+    //       if (!tooltip.contains(e.target)) {
+    //         hideMarkerTooltip();
+    //         document.removeEventListener("mousedown", onClickOutside, true);
+    //       }
+    //     };
+    //     document.addEventListener("mousedown", onClickOutside, true);
+    //   }, 0);
+    // });
+
+    rail.appendChild(marker);
+  }
+
   /***********************************************************
-   * Keep markers synced with layout (THIS WAS MISSING)
+   * Keep markers synced with layout
    ***********************************************************/
   let debounceTimer = null;
   function scheduleRender() {
@@ -186,53 +507,43 @@
   window.addEventListener("resize", scheduleRender, { passive: true });
   window.addEventListener("orientationchange", scheduleRender, { passive: true });
 
-  // attach scroll listener to the real scroll container
   let lastContainer = null;
   setInterval(() => {
     const c = findScrollContainer();
     if (c !== lastContainer) {
-      if (lastContainer) {
-        // we can't easily remove the previous listener reference here,
-        // but switching containers is rare; acceptable for now.
-      }
       lastContainer = c;
       c.addEventListener("scroll", scheduleRender, { passive: true });
       scheduleRender();
     }
   }, 800);
 
-  // rerender when new messages load / DOM changes
   new MutationObserver(scheduleRender).observe(document.body, {
     childList: true,
     subtree: true,
   });
 
   /***********************************************************
-   * Marker click → precise jump (stable)
+   * Marker click → jump + highlight exact selection
    ***********************************************************/
-  document.addEventListener(
-    "click",
-    (e) => {
-      const marker = e.target.closest(`#${RAIL_ID} > div`);
-      if (!marker) return;
+  function highlightRangeInMessage(messageEl, startAbs, endAbs) {
+    function tryJump(attempt = 0) {
+      const r = rangeFromOffsets(messageEl, startAbs, endAbs);
+      if (!r) return;
 
-      e.preventDefault();
-      e.stopPropagation();
-
-      const messageId = marker.dataset.messageId;
-      const blockIndex = Number(marker.dataset.blockIndex);
-
-      const messageEl = document.querySelector(
-        `[data-message-id="${CSS.escape(messageId)}"]`
-      );
-      if (!messageEl) return;
-
-      const blocks = messageEl.querySelectorAll(BLOCK_SELECTOR);
-      const targetBlock = blocks[blockIndex] || messageEl;
+      const rect = r.getBoundingClientRect();
+      if ((rect.height === 0 || rect.top === 0) && attempt < 3) {
+        setTimeout(() => tryJump(attempt + 1), 80);
+        return;
+      }
 
       const container = findScrollContainer();
-      const posInContent = elementCenterYRelativeToContainer(container, targetBlock);
-      const targetScrollTop = posInContent - container.clientHeight / 2;
+      const containerRect = container.getBoundingClientRect();
+
+      const rectCenterViewportY = rect.top + rect.height / 2;
+      const rectCenterInContainer =
+        container.scrollTop + (rectCenterViewportY - containerRect.top);
+
+      const targetScrollTop = rectCenterInContainer - container.clientHeight / 2;
 
       if (
         container === document.scrollingElement ||
@@ -243,76 +554,57 @@
         container.scrollTo({ top: targetScrollTop, behavior: "auto" });
       }
 
-      const prev = targetBlock.style.outline;
-      targetBlock.style.outline = "2px solid #ff9800";
-      setTimeout(() => (targetBlock.style.outline = prev || ""), 800);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(r);
+
+      const prev = messageEl.style.outline;
+      messageEl.style.outline = "2px solid #ff9800";
+      setTimeout(() => {
+        messageEl.style.outline = prev || "";
+        sel.removeAllRanges();
+      }, 900);
+    }
+
+    tryJump();
+  }
+
+  document.addEventListener(
+    "click",
+    (e) => {
+      const marker = e.target.closest(`#${RAIL_ID} > div`);
+      if (!marker) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const messageId = marker.dataset.messageId;
+      const startAbs = Number(marker.dataset.startAbs);
+      const endAbs = Number(marker.dataset.endAbs);
+
+      const messageEl = document.querySelector(
+        `[data-message-id="${CSS.escape(messageId)}"]`
+      );
+      if (!messageEl) return;
+
+      highlightRangeInMessage(messageEl, startAbs, endAbs);
     },
     true
   );
 
   /***********************************************************
-   * Storage: load/save WITHOUT touching UI logic
-   ***********************************************************/
-  function loadBookmarks() {
-    const convoId = getConversationId();
-
-    // If storage isn't available (or permission missing), just run in-memory.
-    if (!chrome?.storage?.sync) {
-      console.warn("[PromptTrail] chrome.storage.sync not available; using memory only.");
-      scheduleRender();
-      return;
-    }
-
-    chrome.storage.sync.get(STORAGE_KEY, (data) => {
-      const all = data[STORAGE_KEY] || {};
-      bookmarks = all[convoId] || [];
-      renderBookmarkMarkers(); // immediate
-      scheduleRender();        // and resync
-    });
-  }
-
-  function persistBookmarks() {
-    const convoId = getConversationId();
-    if (!chrome?.storage?.sync) return;
-
-    chrome.storage.sync.get(STORAGE_KEY, (data) => {
-      const all = data[STORAGE_KEY] || {};
-      all[convoId] = bookmarks;
-      chrome.storage.sync.set({ [STORAGE_KEY]: all }, () => {
-        // keep markers always correct after persistence too
-        renderBookmarkMarkers();
-        scheduleRender();
-      });
-    });
-  }
-
-  loadBookmarks();
-
-  /***********************************************************
-   * Selection-scoped bookmark button (UNCHANGED)
+   * Selection-scoped bookmark button (hover only when selection exists)
    ***********************************************************/
   let activeBlock = null;
-  let selectedBlock = null;
+  let selectionPayload = null;
 
   document.addEventListener("selectionchange", () => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) {
-      selectedBlock = null;
-      if (activeBlock) {
-        removeButton(activeBlock);
-        activeBlock = null;
-      }
-      return;
+    selectionPayload = getSelectionPayload();
+
+    if (!selectionPayload) {
+      if (activeBlock) removeButton(activeBlock);
+      activeBlock = null;
     }
-
-    const range = sel.getRangeAt(0);
-    const startNode = range.startContainer;
-    const el =
-      startNode.nodeType === Node.TEXT_NODE
-        ? startNode.parentElement
-        : startNode;
-
-    selectedBlock = el ? el.closest(BLOCK_SELECTOR) : null;
   });
 
   function removeButton(blockEl) {
@@ -330,7 +622,6 @@
     const btn = document.createElement("button");
     btn.className = BTN_CLASS;
     btn.textContent = "🔖 Bookmark";
-
     btn.style.position = "absolute";
     btn.style.top = "6px";
     btn.style.right = "6px";
@@ -343,23 +634,29 @@
     btn.style.cursor = "pointer";
     btn.style.pointerEvents = "auto";
     btn.style.color = "#111";
-
     blockEl.appendChild(btn);
+  }
+
+  function getHoveredBlockFromEvent(e) {
+    return e.target && e.target.closest ? e.target.closest(BLOCK_SELECTOR) : null;
   }
 
   document.addEventListener(
     "mouseover",
     (e) => {
-      const blockEl =
-        e.target && e.target.closest
-          ? e.target.closest(BLOCK_SELECTOR)
-          : null;
+      if (!selectionPayload) return;
 
-      if (!blockEl || blockEl !== selectedBlock) {
-        if (activeBlock) {
-          removeButton(activeBlock);
-          activeBlock = null;
-        }
+      const blockEl = getHoveredBlockFromEvent(e);
+      if (!blockEl) {
+        if (activeBlock) removeButton(activeBlock);
+        activeBlock = null;
+        return;
+      }
+
+      const msg = findMessageContainer(blockEl);
+      if (!msg || msg.getAttribute("data-message-id") !== selectionPayload.messageId) {
+        if (activeBlock) removeButton(activeBlock);
+        activeBlock = null;
         return;
       }
 
@@ -384,48 +681,65 @@
   );
 
   /***********************************************************
-   * Bookmark button click → add bookmark + persist + render
+   * Save bookmark: prompt for description (default from selection)
    ***********************************************************/
+  function promptDescription(defaultText) {
+    const d = window.prompt("Bookmark description:", defaultText);
+    if (d == null) return null;
+    return d.trim();
+  }
+
   document.addEventListener(
     "click",
     (e) => {
       const btn =
-        e.target && e.target.closest
-          ? e.target.closest(`.${BTN_CLASS}`)
-          : null;
+        e.target && e.target.closest ? e.target.closest(`.${BTN_CLASS}`) : null;
       if (!btn) return;
 
       e.preventDefault();
       e.stopPropagation();
 
-      const blockEl = btn.parentElement;
-      const messageEl = findMessageContainer(blockEl);
+      if (!selectionPayload) return;
+
+      const messageEl = document.querySelector(
+        `[data-message-id="${CSS.escape(selectionPayload.messageId)}"]`
+      );
       if (!messageEl) return;
 
+      const defaultDesc = defaultDescFromText(selectionPayload.selectedText);
+      const desc = promptDescription(defaultDesc);
+      if (desc === null) return;
+
+      const descWords = desc.split(/\s+/).filter(Boolean).slice(0, 10).join(" ");
+
+      const exists = bookmarks.some(
+        (b) =>
+          b.messageId === selectionPayload.messageId &&
+          b.startAbs === selectionPayload.startAbs &&
+          b.endAbs === selectionPayload.endAbs
+      );
+      if (exists) return;
+
       const bookmark = {
-        messageId: messageEl.getAttribute("data-message-id"),
-        role: messageEl.getAttribute("data-message-author-role"),
-        blockIndex: getBlockIndex(messageEl, blockEl),
+        id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(),
+        messageId: selectionPayload.messageId,
+        role: selectionPayload.role,
+        startAbs: selectionPayload.startAbs,
+        endAbs: selectionPayload.endAbs,
+        preview: defaultDescFromText(selectionPayload.selectedText),
+        desc: descWords,
         createdAt: Date.now(),
       };
 
-      // avoid duplicates (same messageId + blockIndex)
-      const exists = bookmarks.some(
-        (b) => b.messageId === bookmark.messageId && b.blockIndex === bookmark.blockIndex
-      );
-      if (!exists) {
-        bookmarks.push(bookmark);
-        persistBookmarks();
-      }
+      bookmarks.push(bookmark);
+      persistBookmarks(() => {
+        renderBookmarkMarkers();
+        scheduleRender();
+      });
 
-      renderBookmarkMarkers();
-      scheduleRender();
-
-      console.log("[PromptTrail] Bookmark saved:", bookmark);
-
-      const prev = blockEl.style.outline;
-      blockEl.style.outline = "2px solid #ffcc00";
-      setTimeout(() => (blockEl.style.outline = prev || ""), 800);
+      const prev = btn.style.outline;
+      btn.style.outline = "2px solid #ffcc00";
+      setTimeout(() => (btn.style.outline = prev || ""), 500);
     },
     true
   );
