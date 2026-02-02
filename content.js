@@ -7,6 +7,7 @@
   const RAIL_ID = "prompttrail-scroll-rail";
   const BLOCK_SELECTOR = "p, li, h1, h2, h3, h4, blockquote, pre";
   const STORAGE_KEY = "prompttrail_bookmarks_v2"; // { [convoId]: Bookmark[] }
+  const INDEX_DROPDOWN_ID = "prompttrail-index-dropdown";
 
   /***********************************************************
    * Conversation id (ChatGPT URL: /c/<id>)
@@ -20,28 +21,54 @@
    * In-memory bookmarks (mirrors storage)
    ***********************************************************/
   let bookmarks = [];
+  let markerTooltip = null;
+  let tooltipLocked = false;
+
 
   /***********************************************************
-   * Debug badge
+   * Debug badge (with menu button)
    ***********************************************************/
   function injectBadgeOnce() {
     if (document.getElementById(BADGE_ID)) return;
 
     const badge = document.createElement("div");
     badge.id = BADGE_ID;
-    badge.textContent = "PromptTrail active";
-    badge.style.position = "fixed";
-    badge.style.top = "16px";
-    badge.style.right = "16px";
-    badge.style.zIndex = "2147483647";
-    badge.style.background = "white";
-    badge.style.border = "1px solid #ddd";
-    badge.style.borderRadius = "8px";
-    badge.style.padding = "6px 10px";
-    badge.style.fontSize = "12px";
-    badge.style.color = "#111";
-    badge.style.pointerEvents = "none";
+
+    Object.assign(badge.style, {
+      position: "fixed",
+      top: "16px",
+      right: "16px",
+      zIndex: "2147483647",
+      background: "white",
+      border: "1px solid #ddd",
+      borderRadius: "10px",
+      padding: "6px 8px",
+      fontSize: "12px",
+      color: "#111",
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      boxShadow: "0 4px 10px rgba(0,0,0,0.08)",
+    });
+
+    badge.innerHTML = `
+      <span style="white-space:nowrap;font-weight:600;">PromptTrail</span>
+      <button id="pt-menu-btn"
+        style="
+          border:none;
+          background:none;
+          cursor:pointer;
+          font-size:16px;
+          line-height:1;
+          padding:2px 4px;
+        "
+        title="Bookmarks"
+      >≡</button>
+    `;
+
     document.documentElement.appendChild(badge);
+
+    badge.querySelector("#pt-menu-btn").addEventListener("click", toggleIndexDropdown, true);
   }
 
   injectBadgeOnce();
@@ -49,6 +76,148 @@
     childList: true,
     subtree: true,
   });
+
+  /***********************************************************
+   * Index dropdown (single definition)
+   ***********************************************************/
+  function toggleIndexDropdown(e) {
+    e?.stopPropagation();
+    // ensure no stale outside handler
+    document.removeEventListener("pointerdown", onOutsideIndexClick, true);
+
+    const existing = document.getElementById(INDEX_DROPDOWN_ID);
+    if (existing) {
+      existing.remove();
+      return;
+    }
+
+    renderIndexDropdown();
+  }
+
+  function renderIndexDropdown() {
+    const badge = document.getElementById(BADGE_ID);
+    if (!badge) return;
+
+    const rect = badge.getBoundingClientRect();
+
+    const dropdown = document.createElement("div");
+    dropdown.id = INDEX_DROPDOWN_ID;
+
+    Object.assign(dropdown.style, {
+      position: "fixed",
+      top: `${rect.bottom + 6}px`,
+      right: `${window.innerWidth - rect.right}px`,
+      width: "320px",
+      maxHeight: "420px",
+      background: "#fff",
+      border: "1px solid #ddd",
+      borderRadius: "10px",
+      boxShadow: "0 10px 24px rgba(0,0,0,0.18)",
+      zIndex: "2147483647",
+      overflow: "hidden",
+      fontSize: "13px",
+      color: "#111",
+    });
+
+    dropdown.innerHTML = `
+      <div style="padding:12px 14px;font-weight:600;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;">
+        <span>📚 Bookmarks</span>
+        <button id="pt-index-close" style="border:none;background:none;cursor:pointer;">✖</button>
+      </div>
+      <div id="pt-index-list" style="flex:1;overflow:auto;padding:8px;max-height:360px;background:#fff;color:#111;"></div>
+    `;
+
+    document.body.appendChild(dropdown);
+    dropdown.querySelector("#pt-index-close").onclick = () => dropdown.remove();
+
+    renderIndexList();
+
+    // close on outside click — pointerdown is robust and runs earlier than click
+    setTimeout(() => document.addEventListener("pointerdown", onOutsideIndexClick, true), 0);
+  }
+
+  function onOutsideIndexClick(e) {
+    const dd = document.getElementById(INDEX_DROPDOWN_ID);
+    const badge = document.getElementById(BADGE_ID);
+    if (!dd) return;
+    // use composedPath where available for shadow DOM friendliness
+    const path = e.composedPath ? e.composedPath() : (e.path || []);
+    const clickedInside = dd.contains(e.target) || badge.contains(e.target) || path.includes(dd) || path.includes(badge);
+    if (clickedInside) return;
+    dd.remove();
+    document.removeEventListener("pointerdown", onOutsideIndexClick, true);
+  }
+
+  function renderIndexList() {
+    const list = document.getElementById("pt-index-list");
+    if (!list) return;
+
+    list.innerHTML = "";
+
+    if (!bookmarks.length) {
+      list.innerHTML = `<div style="opacity:0.6;padding:8px;">No bookmarks yet</div>`;
+      return;
+    }
+
+    // Sort by vertical position in document
+    const container = findScrollContainer();
+
+    const sorted = [...bookmarks].sort((a, b) => {
+      const elA = document.querySelector(`[data-message-id="${CSS.escape(a.messageId)}"]`);
+      const elB = document.querySelector(`[data-message-id="${CSS.escape(b.messageId)}"]`);
+      if (!elA || !elB) return 0;
+
+      const posA = elementCenterYRelativeToContainer(container, elA);
+      const posB = elementCenterYRelativeToContainer(container, elB);
+      return posA - posB;
+    });
+
+    sorted.forEach((b) => {
+      const row = document.createElement("div");
+
+      Object.assign(row.style, {
+        padding: "10px",
+        marginBottom: "6px",
+        borderRadius: "8px",
+        background: "#f7f7f7",
+        cursor: "pointer",
+        color: "#111",
+      });
+
+      row.innerHTML = `
+        <div style="font-weight:600;margin-bottom:6px;color:#111;">
+          ${escapeHtml(b.desc || b.preview || "Bookmark")}
+        </div>
+        <div style="font-size:12px;opacity:0.7;display:flex;justify-content:space-between;align-items:center;">
+          <span>${escapeHtml(b.role || "")}</span>
+          <button data-del style="border:none;background:none;cursor:pointer;font-size:14px;">🗑️</button>
+        </div>
+      `;
+
+      row.addEventListener("mouseenter", () => (row.style.background = "#eaeaea"));
+      row.addEventListener("mouseleave", () => (row.style.background = "#f7f7f7"));
+
+      // Jump on click
+      row.addEventListener("click", (e) => {
+        if (e.target?.dataset?.del) return;
+
+        const messageEl = document.querySelector(`[data-message-id="${CSS.escape(b.messageId)}"]`);
+        if (!messageEl) return;
+
+        highlightRangeInMessage(messageEl, b.startAbs, b.endAbs);
+        document.getElementById(INDEX_DROPDOWN_ID)?.remove();
+      });
+
+      // Delete
+      row.querySelector("[data-del]").onclick = (e) => {
+        e.stopPropagation();
+        deleteBookmark(b);
+        renderIndexList();
+      };
+
+      list.appendChild(row);
+    });
+  }
 
   /***********************************************************
    * Scrollbar overlay rail
@@ -62,7 +231,7 @@
     rail.style.top = "0";
     rail.style.right = "2px";
     rail.style.height = "100vh";
-    rail.style.width = "4px";
+    rail.style.width = "6px";
     rail.style.zIndex = "2147483646";
     rail.style.pointerEvents = "auto";
     rail.style.background = "rgba(0,0,0,0.03)";
@@ -76,10 +245,7 @@
   function findMessageContainer(el) {
     let cur = el;
     while (cur) {
-      if (
-        cur.nodeType === Node.ELEMENT_NODE &&
-        cur.hasAttribute("data-message-id")
-      ) {
+      if (cur.nodeType === Node.ELEMENT_NODE && cur.hasAttribute("data-message-id")) {
         return cur;
       }
       cur = cur.parentNode;
@@ -97,10 +263,7 @@
     while (el) {
       const style = window.getComputedStyle(el);
       const overflowY = style.overflowY;
-      if (
-        (overflowY === "auto" || overflowY === "scroll") &&
-        el.scrollHeight > el.clientHeight
-      ) {
+      if ((overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
         return el;
       }
       el = el.parentElement;
@@ -120,7 +283,6 @@
 
   /***********************************************************
    * Selection → precise offsets within message
-   * We store offsets across ALL text nodes inside the message.
    ***********************************************************/
   function getTextOffsetIn(rootEl, node, nodeOffset) {
     const walker = document.createTreeWalker(rootEl, NodeFilter.SHOW_TEXT, null);
@@ -175,27 +337,14 @@
     const selectedText = sel.toString().trim();
     if (!selectedText) return null;
 
-    // Find a reasonable element to start walking up
-    const startEl =
-      range.startContainer.nodeType === Node.TEXT_NODE
-        ? range.startContainer.parentElement
-        : range.startContainer;
-
+    const startEl = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
     if (!startEl) return null;
 
     const messageEl = findMessageContainer(startEl);
     if (!messageEl) return null;
 
-    const startAbs = getTextOffsetIn(
-      messageEl,
-      range.startContainer,
-      range.startOffset
-    );
-    const endAbs = getTextOffsetIn(
-      messageEl,
-      range.endContainer,
-      range.endOffset
-    );
+    const startAbs = getTextOffsetIn(messageEl, range.startContainer, range.startOffset);
+    const endAbs = getTextOffsetIn(messageEl, range.endContainer, range.endOffset);
 
     if (startAbs < 0 || endAbs < 0 || endAbs <= startAbs) return null;
 
@@ -214,7 +363,7 @@
   }
 
   function escapeHtml(s) {
-    return String(s)
+    return String(s || "")
       .replaceAll("&", "&amp;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;")
@@ -223,86 +372,71 @@
   }
 
   /***********************************************************
-   * Marker tooltip + delete + edit (FIXED)
+   * Marker tooltip lifecycle + edit + delete
    ***********************************************************/
-  let markerTooltip = null;
+  // function hideMarkerTooltip() {
+  //   if (markerTooltip) {
+  //     markerTooltip.remove();
+  //     markerTooltip = null;
+  //   }
+  // }
 
+
+
+  // function hideMarkerTooltip() {
+  //   if (tooltipLocked) return; // 🚫 do not hide during interaction
+  //   if (markerTooltip) {
+  //     markerTooltip.remove();
+  //     markerTooltip = null;
+  //   }
+  // }
   function hideMarkerTooltip() {
     if (markerTooltip) {
       markerTooltip.remove();
       markerTooltip = null;
+      activeTooltipBookmarkId = null;
     }
   }
-
-  function positionTooltipNearMarker(marker, tooltip) {
-    const rect = marker.getBoundingClientRect();
-    const tooltipHeight = tooltip.offsetHeight || 100;
-    const margin = 10;
-
-    // Prefer above
-    let top = rect.top - tooltipHeight - margin;
-
-    // If not enough space above, flip below
-    if (top < margin) {
-      top = rect.bottom + margin;
-    }
-
-    // Clamp to viewport
-    top = Math.min(
-      window.innerHeight - tooltipHeight - margin,
-      Math.max(margin, top)
-    );
-
-    tooltip.style.top = `${top}px`;
-    tooltip.style.right = `12px`;
-  }
-
-  function deleteBookmark(bookmark) {
-    bookmarks = bookmarks.filter((b) =>
-      bookmark.id
-        ? b.id !== bookmark.id
-        : !(
-            b.messageId === bookmark.messageId &&
-            b.startAbs === bookmark.startAbs &&
-            b.endAbs === bookmark.endAbs
-          )
-    );
-
-    persistBookmarks(() => {
-      renderBookmarkMarkers();
-      scheduleRender();
-    });
-  }
+  
+  let activeTooltipBookmarkId = null;
 
   function showMarkerTooltip(marker, bookmark) {
-    if (markerTooltip) return;
+    // ✅ If tooltip already open for this bookmark, do nothing
+    if (markerTooltip && activeTooltipBookmarkId === bookmark.id) return;
+  
+    // Otherwise replace existing tooltip
     hideMarkerTooltip();
-
+    activeTooltipBookmarkId = bookmark.id;
+  
     const tooltip = document.createElement("div");
-    tooltip.style.position = "fixed";
-    tooltip.style.zIndex = "2147483647";
-    tooltip.style.maxWidth = "260px";
-    tooltip.style.padding = "8px 10px";
-    tooltip.style.borderRadius = "10px";
-    tooltip.style.background = "rgba(0,0,0,0.88)";
-    tooltip.style.color = "#fff";
-    tooltip.style.fontSize = "12px";
-    tooltip.style.lineHeight = "1.35";
-    tooltip.style.boxShadow = "0 6px 16px rgba(0,0,0,0.25)";
-    tooltip.style.pointerEvents = "auto";
-
+    markerTooltip = tooltip;
+  
+    Object.assign(tooltip.style, {
+      position: "fixed",
+      zIndex: "2147483647",
+      maxWidth: "320px",
+      padding: "8px 10px",
+      borderRadius: "10px",
+      background: "rgba(0,0,0,0.88)",
+      color: "#fff",
+      fontSize: "13px",
+      lineHeight: "1.35",
+      boxShadow: "0 6px 24px rgba(0,0,0,0.25)",
+      pointerEvents: "auto",
+    });
+  
     tooltip.innerHTML = `
       <div id="pt-desc-view" style="margin-bottom:8px;">
         ${escapeHtml(bookmark.desc || bookmark.preview || "Bookmark")}
       </div>
-
+  
       <input id="pt-desc-edit"
         style="
           display:none;
           width:100%;
           box-sizing:border-box;
-          padding:4px 6px;
-          font-size:12px;
+          padding:6px 8px;
+          font-size:13px;
           border-radius:6px;
           border:1px solid #555;
           outline:none;
@@ -310,93 +444,115 @@
           color:#fff;
         "
       />
-
+  
       <div style="display:flex; gap:10px; align-items:center;">
-        <button id="pt-edit"
-          style="background:none;border:none;color:#9fd1ff;cursor:pointer;font-size:12px;">
+        <button id="pt-edit" style="background:none;border:none;color:#9fd1ff;cursor:pointer;">
           ✏️ Edit
         </button>
-
-        <button id="pt-delete"
-          style="background:none;border:none;color:#ffb4b4;cursor:pointer;font-size:12px;">
+        <button id="pt-delete" style="background:none;border:none;color:#ffb4b4;cursor:pointer;">
           🗑️ Delete
         </button>
       </div>
     `;
-
+  
     document.body.appendChild(tooltip);
-
-    tooltip.addEventListener("mousedown", (e) => {
-      e.stopPropagation();
-    });
-    
-    setTimeout(() => {
-      const onOutsideClick = (e) => {
-        if (!tooltip.contains(e.target)) {
-          hideMarkerTooltip();
-          document.removeEventListener("mousedown", onOutsideClick, true);
-        }
-      };
-      document.addEventListener("mousedown", onOutsideClick, true);
-    }, 0);
-    
-
-    markerTooltip = tooltip;
-
     positionTooltipNearMarker(marker, tooltip);
-
-    // Keep tooltip alive while hovering it
-    // tooltip.addEventListener("mouseleave", hideMarkerTooltip);
-
-    // Wire up controls (FIXED: must be inside function)
+  
+    // Block outside handlers
+    tooltip.addEventListener("pointerdown", (e) => e.stopPropagation());
+  
+    let isEditing = false;
+  
     const view = tooltip.querySelector("#pt-desc-view");
     const input = tooltip.querySelector("#pt-desc-edit");
-    const editBtn = tooltip.querySelector("#pt-edit");
-    const deleteBtn = tooltip.querySelector("#pt-delete");
-
-    editBtn.addEventListener("click", (e) => {
+  
+    tooltip.querySelector("#pt-edit").onclick = (e) => {
       e.stopPropagation();
+      isEditing = true;
       input.value = bookmark.desc || bookmark.preview || "";
       view.style.display = "none";
       input.style.display = "block";
       input.focus();
-    });
-
+    };
+  
     function saveEdit() {
+      if (!isEditing) return;
+      isEditing = false;
       const newDesc = input.value.trim().split(/\s+/).slice(0, 10).join(" ");
       if (newDesc) {
         bookmark.desc = newDesc;
         persistBookmarks(() => {
           renderBookmarkMarkers();
-          scheduleRender();
+          renderIndexList();
         });
       }
       hideMarkerTooltip();
     }
-
-    input.addEventListener("keydown", (e) => {
+  
+    input.onkeydown = (e) => {
       if (e.key === "Enter") saveEdit();
-      if (e.key === "Escape") hideMarkerTooltip();
-    });
-
-    input.addEventListener("blur", saveEdit);
-
-    deleteBtn.addEventListener("click", (e) => {
+      
+      if (e.key === "Escape"){
+        isEditing = false;
+        hideMarkerTooltip();
+      } 
+    };
+  
+    input.onblur = saveEdit;
+  
+    tooltip.querySelector("#pt-delete").onclick = (e) => {
       e.stopPropagation();
       deleteBookmark(bookmark);
       hideMarkerTooltip();
+    };
+  
+    // Close only when leaving BOTH marker and tooltip
+    let inside = true;
+  
+    const maybeClose = () => {
+      setTimeout(() => {
+        if (!inside) hideMarkerTooltip();
+      }, 80);
+    };
+  
+    tooltip.addEventListener("mouseenter", () => {});
+    tooltip.addEventListener("mouseleave", () => {
+      if (isEditing) return; // 🚫 do NOT close while editing
+      hideMarkerTooltip();
     });
+    
+  
+    // marker.addEventListener("mouseleave", () => {
+    //   inside = false;
+    //   maybeClose();
+    // });
+  }
+  
+  function positionTooltipNearMarker(marker, tooltip) {
+    const rect = marker.getBoundingClientRect();
+    const tooltipHeight = tooltip.offsetHeight || 100;
+    const margin = 10;
+
+    // Prefer above, otherwise below
+    let top = rect.top - tooltipHeight - margin;
+    if (top < margin) top = rect.bottom + margin;
+
+    // Clamp
+    top = Math.min(window.innerHeight - tooltipHeight - margin, Math.max(margin, top));
+    // Stick to right side with small offset
+    tooltip.style.top = `${top}px`;
+    tooltip.style.right = `12px`;
   }
 
   /***********************************************************
-   * Storage: load/save
+   * Storage: load/save (chrome.storage.sync fallback)
    ***********************************************************/
   function loadBookmarks() {
     const convoId = getConversationId();
     if (!chrome?.storage?.sync) {
-      console.warn(
-        "[PromptTrail] chrome.storage.sync not available; using memory only."
-      );
+      console.warn("[PromptTrail] chrome.storage.sync not available; using memory only.");
+      // keep current (empty) bookmarks
+      renderBookmarkMarkers();
       return;
     }
 
@@ -404,6 +560,7 @@
       const all = data[STORAGE_KEY] || {};
       bookmarks = all[convoId] || [];
       renderBookmarkMarkers();
+      renderIndexList();
       scheduleRender();
     });
   }
@@ -412,53 +569,59 @@
     const convoId = getConversationId();
     if (!chrome?.storage?.sync) {
       cb?.();
+      renderIndexList();
       return;
     }
 
     chrome.storage.sync.get(STORAGE_KEY, (data) => {
       const all = data[STORAGE_KEY] || {};
       all[convoId] = bookmarks;
-      chrome.storage.sync.set({ [STORAGE_KEY]: all }, () => cb?.());
+      chrome.storage.sync.set({ [STORAGE_KEY]: all }, () => {
+        cb?.();
+        renderIndexList();
+      });
     });
   }
 
   loadBookmarks();
 
   /***********************************************************
-   * Render markers (pixel-accurate using saved range mid-point)
+   * Render markers (using saved range midpoint)
    ***********************************************************/
   function renderBookmarkMarkers() {
     const rail = document.getElementById(RAIL_ID);
     if (!rail) return;
 
+    // Clear old markers
     rail.innerHTML = "";
 
     const container = findScrollContainer();
     const scrollRange = Math.max(1, container.scrollHeight - container.clientHeight);
 
     bookmarks.forEach((bookmark) => {
-      const messageEl = document.querySelector(
-        `[data-message-id="${CSS.escape(bookmark.messageId)}"]`
-      );
+      const messageEl = document.querySelector(`[data-message-id="${CSS.escape(bookmark.messageId)}"]`);
       if (!messageEl) return;
 
       const r = rangeFromOffsets(messageEl, bookmark.startAbs, bookmark.endAbs);
-      let targetEl = messageEl;
+      let posPercent = 0;
 
       if (r) {
         const rect = r.getBoundingClientRect();
         if (rect && rect.height > 0) {
+          // create fake element for center calculation
           const fake = { getBoundingClientRect: () => rect };
           const pos = elementCenterYRelativeToContainer(container, fake);
-          const percent = Math.max(0, Math.min(1, pos / scrollRange));
-          appendMarker(rail, percent, bookmark);
-          return;
+          posPercent = Math.max(0, Math.min(1, pos / scrollRange));
+        } else {
+          const pos = elementCenterYRelativeToContainer(container, messageEl);
+          posPercent = Math.max(0, Math.min(1, pos / scrollRange));
         }
+      } else {
+        const pos = elementCenterYRelativeToContainer(container, messageEl);
+        posPercent = Math.max(0, Math.min(1, pos / scrollRange));
       }
 
-      const posInContent = elementCenterYRelativeToContainer(container, targetEl);
-      const percent = Math.max(0, Math.min(1, posInContent / scrollRange));
-      appendMarker(rail, percent, bookmark);
+      appendMarker(rail, posPercent, bookmark);
     });
   }
 
@@ -468,29 +631,30 @@
     marker.style.top = `${percent * 100}%`;
     marker.style.left = "0";
     marker.style.width = "100%";
-    marker.style.height = "3px";
+    marker.style.height = "4px";
     marker.style.background = "#ff9800";
     marker.style.borderRadius = "2px";
     marker.style.cursor = "pointer";
     marker.style.pointerEvents = "auto";
 
-    marker.dataset.id = bookmark.id || "";
+    marker.dataset.ptForId = bookmark.id || "";
     marker.dataset.messageId = bookmark.messageId;
     marker.dataset.startAbs = String(bookmark.startAbs);
     marker.dataset.endAbs = String(bookmark.endAbs);
 
-    marker.addEventListener("mouseenter", () => showMarkerTooltip(marker, bookmark));
-    // marker.addEventListener("mouseleave", () => {
-    //   setTimeout(() => {
-    //     const onClickOutside = (e) => {
-    //       if (!tooltip.contains(e.target)) {
-    //         hideMarkerTooltip();
-    //         document.removeEventListener("mousedown", onClickOutside, true);
-    //       }
-    //     };
-    //     document.addEventListener("mousedown", onClickOutside, true);
-    //   }, 0);
-    // });
+    marker.addEventListener("mouseenter", () => {
+      // show tooltip for this bookmark
+      showMarkerTooltip(marker, bookmark);
+    });
+
+    // clicking marker jumps to range
+    marker.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const messageEl = document.querySelector(`[data-message-id="${CSS.escape(bookmark.messageId)}"]`);
+      if (!messageEl) return;
+      highlightRangeInMessage(messageEl, bookmark.startAbs, bookmark.endAbs);
+    });
 
     rail.appendChild(marker);
   }
@@ -540,15 +704,11 @@
       const containerRect = container.getBoundingClientRect();
 
       const rectCenterViewportY = rect.top + rect.height / 2;
-      const rectCenterInContainer =
-        container.scrollTop + (rectCenterViewportY - containerRect.top);
+      const rectCenterInContainer = container.scrollTop + (rectCenterViewportY - containerRect.top);
 
       const targetScrollTop = rectCenterInContainer - container.clientHeight / 2;
 
-      if (
-        container === document.scrollingElement ||
-        container === document.documentElement
-      ) {
+      if (container === document.scrollingElement || container === document.documentElement) {
         window.scrollTo({ top: targetScrollTop, behavior: "auto" });
       } else {
         container.scrollTo({ top: targetScrollTop, behavior: "auto" });
@@ -568,29 +728,6 @@
 
     tryJump();
   }
-
-  document.addEventListener(
-    "click",
-    (e) => {
-      const marker = e.target.closest(`#${RAIL_ID} > div`);
-      if (!marker) return;
-
-      e.preventDefault();
-      e.stopPropagation();
-
-      const messageId = marker.dataset.messageId;
-      const startAbs = Number(marker.dataset.startAbs);
-      const endAbs = Number(marker.dataset.endAbs);
-
-      const messageEl = document.querySelector(
-        `[data-message-id="${CSS.escape(messageId)}"]`
-      );
-      if (!messageEl) return;
-
-      highlightRangeInMessage(messageEl, startAbs, endAbs);
-    },
-    true
-  );
 
   /***********************************************************
    * Selection-scoped bookmark button (hover only when selection exists)
@@ -641,44 +778,36 @@
     return e.target && e.target.closest ? e.target.closest(BLOCK_SELECTOR) : null;
   }
 
-  document.addEventListener(
-    "mouseover",
-    (e) => {
-      if (!selectionPayload) return;
+  document.addEventListener("mouseover", (e) => {
+    if (!selectionPayload) return;
 
-      const blockEl = getHoveredBlockFromEvent(e);
-      if (!blockEl) {
-        if (activeBlock) removeButton(activeBlock);
-        activeBlock = null;
-        return;
-      }
-
-      const msg = findMessageContainer(blockEl);
-      if (!msg || msg.getAttribute("data-message-id") !== selectionPayload.messageId) {
-        if (activeBlock) removeButton(activeBlock);
-        activeBlock = null;
-        return;
-      }
-
-      if (activeBlock !== blockEl) {
-        removeButton(activeBlock);
-        activeBlock = blockEl;
-        showButton(blockEl);
-      }
-    },
-    true
-  );
-
-  document.addEventListener(
-    "mouseout",
-    (e) => {
-      if (!activeBlock) return;
-      if (e.relatedTarget && activeBlock.contains(e.relatedTarget)) return;
-      removeButton(activeBlock);
+    const blockEl = getHoveredBlockFromEvent(e);
+    if (!blockEl) {
+      if (activeBlock) removeButton(activeBlock);
       activeBlock = null;
-    },
-    true
-  );
+      return;
+    }
+
+    const msg = findMessageContainer(blockEl);
+    if (!msg || msg.getAttribute("data-message-id") !== selectionPayload.messageId) {
+      if (activeBlock) removeButton(activeBlock);
+      activeBlock = null;
+      return;
+    }
+
+    if (activeBlock !== blockEl) {
+      removeButton(activeBlock);
+      activeBlock = blockEl;
+      showButton(blockEl);
+    }
+  }, true);
+
+  document.addEventListener("mouseout", (e) => {
+    if (!activeBlock) return;
+    if (e.relatedTarget && activeBlock.contains(e.relatedTarget)) return;
+    removeButton(activeBlock);
+    activeBlock = null;
+  }, true);
 
   /***********************************************************
    * Save bookmark: prompt for description (default from selection)
@@ -689,58 +818,87 @@
     return d.trim();
   }
 
-  document.addEventListener(
-    "click",
-    (e) => {
-      const btn =
-        e.target && e.target.closest ? e.target.closest(`.${BTN_CLASS}`) : null;
-      if (!btn) return;
+  document.addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest(`.${BTN_CLASS}`) : null;
+    if (!btn) return;
 
-      e.preventDefault();
-      e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
 
-      if (!selectionPayload) return;
+    if (!selectionPayload) return;
 
-      const messageEl = document.querySelector(
-        `[data-message-id="${CSS.escape(selectionPayload.messageId)}"]`
-      );
-      if (!messageEl) return;
+    const messageEl = document.querySelector(`[data-message-id="${CSS.escape(selectionPayload.messageId)}"]`);
+    if (!messageEl) return;
 
-      const defaultDesc = defaultDescFromText(selectionPayload.selectedText);
-      const desc = promptDescription(defaultDesc);
-      if (desc === null) return;
+    const defaultDesc = defaultDescFromText(selectionPayload.selectedText);
+    const desc = promptDescription(defaultDesc);
+    if (desc === null) return;
 
-      const descWords = desc.split(/\s+/).filter(Boolean).slice(0, 10).join(" ");
+    const descWords = desc.split(/\s+/).filter(Boolean).slice(0, 10).join(" ");
 
-      const exists = bookmarks.some(
-        (b) =>
-          b.messageId === selectionPayload.messageId &&
-          b.startAbs === selectionPayload.startAbs &&
-          b.endAbs === selectionPayload.endAbs
-      );
-      if (exists) return;
+    const exists = bookmarks.some((b) =>
+      b.messageId === selectionPayload.messageId && b.startAbs === selectionPayload.startAbs && b.endAbs === selectionPayload.endAbs
+    );
+    if (exists) return;
 
-      const bookmark = {
-        id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(),
-        messageId: selectionPayload.messageId,
-        role: selectionPayload.role,
-        startAbs: selectionPayload.startAbs,
-        endAbs: selectionPayload.endAbs,
-        preview: defaultDescFromText(selectionPayload.selectedText),
-        desc: descWords,
-        createdAt: Date.now(),
-      };
+    const bookmark = {
+      id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(),
+      messageId: selectionPayload.messageId,
+      role: selectionPayload.role,
+      startAbs: selectionPayload.startAbs,
+      endAbs: selectionPayload.endAbs,
+      preview: defaultDescFromText(selectionPayload.selectedText),
+      desc: descWords,
+      createdAt: Date.now(),
+    };
 
-      bookmarks.push(bookmark);
-      persistBookmarks(() => {
-        renderBookmarkMarkers();
-        scheduleRender();
-      });
+    bookmarks.push(bookmark);
+    persistBookmarks(() => {
+      renderBookmarkMarkers();
+      scheduleRender();
+    });
 
-      const prev = btn.style.outline;
-      btn.style.outline = "2px solid #ffcc00";
-      setTimeout(() => (btn.style.outline = prev || ""), 500);
-    },
-    true
-  );
+    const prev = btn.style.outline;
+    btn.style.outline = "2px solid #ffcc00";
+    setTimeout(() => (btn.style.outline = prev || ""), 500);
+  }, true);
+
+  /***********************************************************
+   * Utility: default desc & delete helpers
+   ***********************************************************/
+  function defaultDescFromText(text) {
+    const words = (text || "").trim().split(/\s+/).filter(Boolean);
+    return words.slice(0, 10).join(" ");
+  }
+
+  function deleteBookmark(bookmark) {
+    bookmarks = bookmarks.filter((b) =>
+      bookmark.id ? b.id !== bookmark.id : !(b.messageId === bookmark.messageId && b.startAbs === bookmark.startAbs && b.endAbs === bookmark.endAbs)
+    );
+
+    persistBookmarks(() => {
+      renderBookmarkMarkers();
+      scheduleRender();
+      renderIndexList();
+    });
+  }
+
+  /***********************************************************
+   * Helper: highlightRangeInMessage exposed jump function for index
+   ***********************************************************/
+  function highlightRangeInMessage_forIndex(messageId, startAbs, endAbs) {
+    const messageEl = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+    if (!messageEl) return;
+    highlightRangeInMessage(messageEl, startAbs, endAbs);
+  }
+
+  /***********************************************************
+   * load initial markers & index
+   ***********************************************************/
+  // initial render may be empty until storage loads
+  setTimeout(() => {
+    renderBookmarkMarkers();
+    renderIndexList();
+  }, 200);
+
 })();
