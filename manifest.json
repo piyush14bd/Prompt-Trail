@@ -10,17 +10,20 @@
       "https://claude.ai/*"
     ],
     "content_scripts": [
-        {
-          "matches": [
-            "https://chatgpt.com/*",
-            "https://chat.openai.com/*",
-            "https://claude.ai/*"
-          ],
-          "js": ["content.js"],
-          "run_at": "document_idle",
-          "all_frames": true
-        }
+      {
+        "matches": [
+          "https://chatgpt.com/*",
+          "https://chat.openai.com/*",
+          "https://claude.ai/*"
+        ],
+        "js": ["content.js"],
+        "run_at": "document_idle",
+        "all_frames": true
+      }
     ]
+    
+    
+    
       
   }
 

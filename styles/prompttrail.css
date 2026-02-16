@@ -1,0 +1,158 @@
+/* styles/prompttrail.css */
+
+/* ============================= */
+/* Badge */
+/* ============================= */
+#prompttrail-badge {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 2147483647;
+    background: #ffffff;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    padding: 6px 8px;
+    font-size: 12px;
+    color: #111;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.08);
+  }
+  
+  #prompttrail-badge button {
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 4px;
+  }
+  
+  /* ============================= */
+  /* Index Dropdown */
+  /* ============================= */
+  #prompttrail-index-dropdown {
+    position: fixed;
+    width: 320px;
+    max-height: 420px;
+    background: #ffffff;
+    border: 1px solid #ddd;
+    border-radius: 10px;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+    z-index: 2147483647;
+    font-size: 13px;
+    color: #111;
+    overflow: hidden;
+  }
+  
+  #prompttrail-index-dropdown .pt-index-header {
+    padding: 12px 14px;
+    font-weight: 600;
+    border-bottom: 1px solid #eee;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  
+  #prompttrail-index-list {
+    overflow: auto;
+    padding: 8px;
+    max-height: 360px;
+    background: #ffffff;
+  }
+  
+  .pt-index-row {
+    padding: 10px;
+    margin-bottom: 6px;
+    border-radius: 8px;
+    background: #f7f7f7;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  
+  .pt-index-row:hover {
+    background: #eaeaea;
+  }
+  
+  /* ============================= */
+  /* Scroll Rail */
+  /* ============================= */
+  #prompttrail-scroll-rail {
+    position: fixed;
+    top: 0;
+    right: 2px;
+    height: 100vh;
+    width: 6px;
+    z-index: 2147483646;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.03);
+  }
+  
+  .pt-scroll-marker {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    height: 4px;
+    background: #ff9800;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  
+  .pt-scroll-marker:hover {
+    background: #ffb74d;
+  }
+  
+  /* ============================= */
+  /* Marker Tooltip */
+  /* ============================= */
+  .pt-marker-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    max-width: 320px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: rgba(0, 0, 0, 0.88);
+    color: #ffffff;
+    font-size: 13px;
+    line-height: 1.35;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+  }
+  
+  .pt-marker-tooltip button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 13px;
+    padding: 2px 4px;
+  }
+  
+  .pt-marker-tooltip .pt-edit {
+    color: #9fd1ff;
+  }
+  
+  .pt-marker-tooltip .pt-delete {
+    color: #ffb4b4;
+  }
+  
+  /* ============================= */
+  /* Selection Floater */
+  /* ============================= */
+  .pt-selection-floater {
+    position: fixed;
+    z-index: 2147483647;
+    padding: 6px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    background: #ffffff;
+    cursor: pointer;
+    font-size: 14px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    transition: transform 0.12s ease, opacity 0.12s ease;
+  }
+  
+  .pt-selection-floater:hover {
+    transform: scale(1.05);
+  }
+  
